@@ -1,0 +1,10 @@
+.idea/
+db/*
+logs/*
+!db/
+!logs/
+
+*.session
+*.session-*
+
+config.yml

@@ -187,7 +187,7 @@ class TelegramStorageProvider(StorageProvider):
 
     @staticmethod
     def split_path(path: str) -> Tuple[str, str]:
-        path_list = path.split('/')
+        path_list = path.rstrip('/').split('/')
         basename = path_list[-1]
         dirname = '/'.join(path_list[:-1])
         return dirname, basename
@@ -237,10 +237,10 @@ class TelegramStorageProvider(StorageProvider):
             yield data
             length -= len(data)
 
-    async def __write_document(self, chat_id: int, file_buffer: io.BytesIO, file_name: str) -> Message:
+    async def __write_document(self, chat_id: int, file_buffer: io.BytesIO) -> Message:
         async def wrapper(fut):
-            data_msg = await self.client.send_document(chat_id, file_buffer, file_name=file_name)
-            logger.info('sent document; chat_id: %d, file_name: %s', chat_id, file_name)
+            data_msg = await self.client.send_document(chat_id, file_buffer)
+            logger.info('sent document; chat_id: %d, name: %s', chat_id, file_buffer.name)
             fut.set_result(data_msg)
 
         future = DummyFuture()
@@ -265,6 +265,20 @@ class TelegramStorageProvider(StorageProvider):
 
         if future.result is None:
             raise RuntimeError('failed to delete documents')
+        return future.result
+
+    async def __copy_documents(self, chat_id: int, message_id: int) -> int:
+        async def wrapper(fut):
+            msg = await self.client.copy_message(chat_id=chat_id, from_chat_id=chat_id, message_id=message_id)
+            fut.set_result(msg.id)
+
+        future = DummyFuture()
+        self.loop.create_task(wrapper(future))
+        while future.result is None:
+            await asyncio.sleep(0.01)
+
+        if future.result is None:
+            raise RuntimeError('failed to copy documents')
         return future.result
 
     async def __read_document(self, chat_id: int, message_id: int) -> bytes:
@@ -304,6 +318,11 @@ class TelegramStorageProvider(StorageProvider):
         if file_node.is_dir:
             raise IsADirectoryError(path)
 
+        def __bytes2io(_bytes: bytes, _name: str) -> io.BytesIO:
+            _io = io.BytesIO(_bytes)
+            _io.name = _name
+            return _io
+
         chat_id = self.data_chat
         upload_buffer = io.BytesIO()
         pending_size = 0
@@ -319,7 +338,7 @@ class TelegramStorageProvider(StorageProvider):
                 upload_buffer.seek(write_offset)
                 writing = upload_buffer.read(self.chunk_size)
                 writing_size = len(writing)
-                data_msg = await self.__write_document(chat_id, io.BytesIO(writing), path)
+                data_msg = await self.__write_document(chat_id, __bytes2io(writing, basename))
                 new_chunk = DataChunk(chat_id=chat_id, message_id=data_msg.id, offset=write_offset, size=writing_size)
                 new_file_chunks.append(new_chunk)
                 write_offset += writing_size
@@ -329,7 +348,7 @@ class TelegramStorageProvider(StorageProvider):
         if pending_size:
             upload_buffer.seek(write_offset)
             writing = upload_buffer.read()
-            data_msg = await self.__write_document(chat_id, io.BytesIO(writing), path)
+            data_msg = await self.__write_document(chat_id, __bytes2io(writing, basename))
             new_file_chunks.append(
                 DataChunk(chat_id=chat_id, message_id=data_msg.id, offset=write_offset, size=pending_size)
             )
@@ -355,17 +374,21 @@ class TelegramStorageProvider(StorageProvider):
         node = dir_node.pop_child(basename)
         if node is None:
             raise FileNotFoundError(path)
+        await self.__rm_node_content(node)
+        logger.info('path removed: %s', path)
+        self.persist_meta()
+
+    async def __rm_node_content(self, node: FileNode):
         # remove data
         if node.is_dir:
             for child in node.children.values():
-                await self.rm(f'{path}/{child.name}')
-            logger.info('directory removed; path: %s', path)
+                await self.__rm_node_content(child)
+            logger.debug('directory node removed: %s', node)
         else:
             delete_msgs = [chunk.message_id for chunk in node.data_chunks]
             if delete_msgs:
                 await self.__delete_documents(self.data_chat, delete_msgs)
-            logger.info('file removed; path: %s', path)
-        self.persist_meta()
+            logger.debug('file node removed: %s', node)
 
     async def mkdir(self, path: str):
         dirname, basename = self.split_path(path)
@@ -377,7 +400,54 @@ class TelegramStorageProvider(StorageProvider):
         self.persist_meta()
 
     async def mv(self, src: str, dst: str):
-        pass
+        dir_src, base_src = self.split_path(src)
+        dir_dst, base_dst = self.split_path(dst)
+        dir_src_node = self.get_file_node(dir_src)
+        dir_dst_node = self.get_file_node(dir_dst)
+        for _n, _p in ((dir_src_node, dir_src), (dir_dst_node, dir_dst)):
+            if not _n:
+                raise FileNotFoundError(_p)
+            if not _n.is_dir:
+                raise NotADirectoryError(_p)
+
+        src_node = dir_src_node.pop_child(base_src)
+        if not src_node:
+            raise FileNotFoundError(src)
+        dst_node = dir_dst_node.pop_child(base_dst)
+        src_node.name = base_dst
+        dir_dst_node.set_child(base_dst, src_node)
+        self.persist_meta()
+        if dst_node:
+            await self.__rm_node_content(dst_node)
 
     async def cp(self, src: str, dst: str):
-        pass
+        dir_src, base_src = self.split_path(src)
+        dir_src_node = self.get_file_node(dir_src)
+        dir_dst, base_dst = self.split_path(dst)
+        dir_dst_node = self.get_file_node(dir_dst)
+        for _n, _p in ((dir_src_node, dir_src), (dir_dst_node, dir_dst)):
+            if not _n:
+                raise FileNotFoundError(_p)
+            if not _n.is_dir:
+                raise NotADirectoryError(_p)
+
+        src_node = dir_src_node.get_child(base_src)
+        if not src_node:
+            raise FileNotFoundError(src)
+        old_dst_node = dir_dst_node.pop_child(base_dst)
+        if src_node.is_dir:
+            dir_dst_node.set_child(base_dst, FileNode(name=base_dst, is_dir=True))
+            for _c in src_node.children.values():
+                await self.cp(f'{src}/{_c.name}', f'{dst}/{_c.name}')
+        else:
+            dst_node = FileNode(name=base_dst, is_dir=False, size=src_node.size)
+            for _ch in src_node.data_chunks:
+                dst_node.data_chunks.append(DataChunk(
+                    chat_id=_ch.chat_id, message_id=(await self.__copy_documents(_ch.chat_id, _ch.message_id)),
+                    offset=_ch.offset, size=_ch.size,
+                ))
+            dir_dst_node.set_child(base_dst, dst_node)
+
+        self.persist_meta()
+        if old_dst_node:
+            await self.__rm_node_content(old_dst_node)

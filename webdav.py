@@ -150,9 +150,18 @@ class WebDav:
         destination = request.headers.get('Destination')
         destination = urllib.parse.urlparse(destination)
         destination = destination.path.strip('/')
+        destination = urllib.parse.unquote(destination)
         if not destination:
             abort(400)
-        if await self.storage.exists(destination):
+        overwrite = request.headers.get('Overwrite', 'T').lower()
+        if overwrite == 't':
+            overwrite = True
+        elif overwrite == 'f':
+            overwrite = False
+        else:
+            abort(400)
+
+        if not overwrite and await self.storage.exists(destination):
             abort(412)
         if method == 'COPY':
             await self.storage.cp(path, destination)
@@ -166,15 +175,17 @@ class WebDav:
         body_str = await request.get_data()
         logger.debug('propfind: body %s', body_str)
 
-        body = etree.fromstring(body_str)
-        propfind_child = body.find('{DAV:}allprop') or body.find('{DAV:}propname') or body.find('{DAV:}prop')
-        if propfind_child is None:
-            abort(400)
-        propfind_type = propfind_child.tag.split('}')[1]
-        if propfind_type == 'prop':
-            requested_props = [child.tag for child in propfind_child]
-        else:
-            requested_props = []
+        propfind_type = 'allprop'
+        requested_props = []
+
+        if body_str:
+            body = etree.fromstring(body_str)
+            propfind_child = body.find('{DAV:}allprop') or body.find('{DAV:}propname') or body.find('{DAV:}prop')
+            if propfind_child is None:
+                abort(400)
+            propfind_type = propfind_child.tag.split('}')[1]
+            if propfind_type == 'prop':
+                requested_props = [child.tag for child in propfind_child]
 
         headers = request.headers
         logger.debug('propfind: headers %s', headers)

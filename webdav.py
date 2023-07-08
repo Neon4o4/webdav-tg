@@ -39,7 +39,7 @@ class WebDav:
             status=200, headers={
                 'Allow': ', '.join(WebDav.ALLOWED_METHODS),
                 'Content-length': 0,
-                'DAV': '1, 2',  # OSX Finder need Ver 2, if Ver 1 -- read only
+                'DAV': '1, resumable-upload',  # OSX Finder need Ver 2, if Ver 1 -- read only
                 'Server': 'WebDAV',
                 # 'MS-Author-Via': 'DAV',
             },
@@ -64,6 +64,8 @@ class WebDav:
         handler = handlers.get(request.method)
         if not handler:
             abort(503)
+
+        logger.info('Request: [%s][%s][Range: %s]', request.method, path, request.headers.get('Range'))
 
         return await handler(path)
 

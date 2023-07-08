@@ -1,14 +1,17 @@
 import asyncio
 import json
 import logging
+import math
 import os.path
 import pickle
+import queue
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Optional, List, Iterator, Dict, Any, Tuple, BinaryIO
 
 import pyrogram
+import pyrogram.file_id
 from pyrogram.types import Message
 
 from storage import StorageProvider
@@ -30,6 +33,7 @@ class DummyFuture:
 class DataChunk:
     chat_id: int
     message_id: int
+    file_id: str
     offset: int
     size: int
 
@@ -37,6 +41,7 @@ class DataChunk:
         return {
             'chat_id': self.chat_id,
             'message_id': self.message_id,
+            'file_id': self.file_id,
             'offset': self.offset,
             'size': self.size,
         }
@@ -101,18 +106,6 @@ class FileNode:
     def __str__(self):
         return json.dumps(self.to_dict())
 
-    def clone(self):
-        return FileNode(
-            name=self.name,
-            is_dir=self.is_dir,
-            size=self.size,
-            ctime=self.ctime,
-            mtime=self.mtime,
-            mime_type=self.mime_type,
-            children={k: v.clone() for k, v in self.children.items()},
-            data_chunks=[DataChunk(**chunk.to_dict()) for chunk in self.data_chunks],
-        )
-
 
 class TelegramStorageProvider(StorageProvider):
     def __init__(self, fs_meta: str, config: dict):
@@ -131,7 +124,7 @@ class TelegramStorageProvider(StorageProvider):
 
         # run request handler in separate thread
         self.running = True
-        self.bot_srv_thd = threading.Thread(target=self.__client_task)
+        self.bot_srv_thd = threading.Thread(name='TelegramClientThread', target=self.__client_task)
         self.bot_srv_thd.daemon = True
         self.bot_srv_thd.start()
 
@@ -228,14 +221,17 @@ class TelegramStorageProvider(StorageProvider):
             if chunk.size < offset:
                 offset -= chunk.size
                 continue
-            data = await self.__read_document(self.data_chat, chunk.message_id)
-            if offset > 0:
-                data = data[offset:offset + length]
-                offset = 0
-            if len(data) > length:
-                data = data[:length]
-            yield data
-            length -= len(data)
+            data: bytes
+            async for data in self.__read_document(chunk.file_id, chunk.size, offset, length):
+                if offset > 0:
+                    # no need to offset in following chunks
+                    offset = 0
+                if len(data) > length:
+                    data = data[:length]
+                yield data
+                length -= len(data)
+                if length <= 0:
+                    break
 
     async def __write_document(self, chat_id: int, file_buffer: io.BytesIO) -> Message:
         async def wrapper(fut):
@@ -267,10 +263,12 @@ class TelegramStorageProvider(StorageProvider):
             raise RuntimeError('failed to delete documents')
         return future.result
 
-    async def __copy_documents(self, chat_id: int, message_id: int) -> int:
+    async def __copy_documents(self, chat_id: int, message_id: int) -> Tuple[int, str]:
         async def wrapper(fut):
             msg = await self.client.copy_message(chat_id=chat_id, from_chat_id=chat_id, message_id=message_id)
-            fut.set_result(msg.id)
+            file_id = msg.document.file_id
+            logger.info('copied %s; chat_id: %d, to: %d, file_id: %s', message_id, chat_id, msg.id, file_id)
+            fut.set_result((msg.id, file_id))
 
         future = DummyFuture()
         self.loop.create_task(wrapper(future))
@@ -281,33 +279,52 @@ class TelegramStorageProvider(StorageProvider):
             raise RuntimeError('failed to copy documents')
         return future.result
 
-    async def __read_document(self, chat_id: int, message_id: int) -> bytes:
-        async def wrapper(fut):
-            data_msg = await self.client.get_messages(chat_id, message_id)
-            logger.info('read document; chat_id: %d, message_id: %d', chat_id, message_id)
-            document = data_msg.document
-            if document is None:
-                raise RuntimeError('failed to read document')
-            doc_io: BinaryIO = await self.client.download_media(data_msg, in_memory=True)
-            doc_io.seek(0)
-            fut.set_result(doc_io.read())
+    async def __read_document(self, file_id: str, file_size: int, offset: int, limit: int) -> AsyncIterator[bytes]:
+        async def wrapper(_q: queue.Queue):
+            read_cnt = 0
+            file_id_obj = pyrogram.file_id.FileId.decode(file_id)
+            # read by chunk
+            chunk_size = 1024 * 1024
+            chunk_start = math.floor(offset / chunk_size)
+            chunk_end = math.ceil(
+                (offset + limit - 1 if limit >= 0 else file_size - 1) / chunk_size
+            )
 
-        future = DummyFuture()
-        self.loop.create_task(wrapper(future))
-        while future.result is None:
-            await asyncio.sleep(0.01)
+            _ch: bytes
+            async for _ch in self.client.get_file(
+                    file_id_obj, file_size, limit=(chunk_end - chunk_start + 1), offset=chunk_start,
+            ):
+                if not _ch:
+                    continue
+                if 0 < limit < read_cnt + len(_ch):
+                    _q.put(_ch[:(limit - read_cnt)])
+                    read_cnt += limit - read_cnt
+                    break
+                else:
+                    _q.put(_ch)
+                    read_cnt += len(_ch)
+            _q.put(None)
 
-        if future.result is None:
-            raise RuntimeError('failed to read document')
-        return future.result
+        chunk_queue = queue.Queue()
+        self.loop.create_task(wrapper(chunk_queue))
+        data_chunk: bytes
+        while True:
+            try:
+                data_chunk = chunk_queue.get_nowait()
+            except queue.Empty:
+                await asyncio.sleep(0.01)
+                continue
+            if data_chunk is None:
+                break
+            yield data_chunk
 
     async def write_file(self, path: str, stream: AsyncIterator[bytes], offset: int):
         # TODO offset support
         assert offset == 0
 
         file_node = self.get_file_node(path)
+        dirname, basename = self.split_path(path)
         if file_node is None:
-            dirname, basename = self.split_path(path)
             parent_node = self.get_file_node(dirname)
             if parent_node is None:
                 raise FileNotFoundError(path)
@@ -339,7 +356,10 @@ class TelegramStorageProvider(StorageProvider):
                 writing = upload_buffer.read(self.chunk_size)
                 writing_size = len(writing)
                 data_msg = await self.__write_document(chat_id, __bytes2io(writing, basename))
-                new_chunk = DataChunk(chat_id=chat_id, message_id=data_msg.id, offset=write_offset, size=writing_size)
+                new_chunk = DataChunk(
+                    chat_id=chat_id, message_id=data_msg.id, file_id=data_msg.document.file_id,
+                    offset=write_offset, size=writing_size,
+                )
                 new_file_chunks.append(new_chunk)
                 write_offset += writing_size
                 pending_size -= writing_size
@@ -349,9 +369,10 @@ class TelegramStorageProvider(StorageProvider):
             upload_buffer.seek(write_offset)
             writing = upload_buffer.read()
             data_msg = await self.__write_document(chat_id, __bytes2io(writing, basename))
-            new_file_chunks.append(
-                DataChunk(chat_id=chat_id, message_id=data_msg.id, offset=write_offset, size=pending_size)
-            )
+            new_file_chunks.append(DataChunk(
+                chat_id=chat_id, message_id=data_msg.id, file_id=data_msg.document.file_id,
+                offset=write_offset, size=pending_size,
+            ))
             write_offset += pending_size
         logger.debug('file messages: %s', new_file_chunks)
 
@@ -442,8 +463,9 @@ class TelegramStorageProvider(StorageProvider):
         else:
             dst_node = FileNode(name=base_dst, is_dir=False, size=src_node.size)
             for _ch in src_node.data_chunks:
+                _copied_msg, _copied_file = await self.__copy_documents(_ch.chat_id, _ch.message_id)
                 dst_node.data_chunks.append(DataChunk(
-                    chat_id=_ch.chat_id, message_id=(await self.__copy_documents(_ch.chat_id, _ch.message_id)),
+                    chat_id=_ch.chat_id, message_id=_copied_msg, file_id=_copied_file,
                     offset=_ch.offset, size=_ch.size,
                 ))
             dir_dst_node.set_child(base_dst, dst_node)

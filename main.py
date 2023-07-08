@@ -3,7 +3,6 @@ import logging
 
 from config import setup_logger
 from config import CONFIG
-from storage.fs import FilesystemStorageProvider
 from storage.tg import TelegramStorageProvider
 from webdav import WebDav
 

@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import logging
 import math
@@ -7,16 +8,14 @@ import pickle
 import queue
 import threading
 import time
-from dataclasses import dataclass, field
-from typing import AsyncIterator, Optional, List, Iterator, Dict, Any, Tuple, BinaryIO
+from dataclasses import dataclass
+from typing import AsyncIterator, Optional, List, Dict, Any, Tuple
 
 import pyrogram
 import pyrogram.file_id
 from pyrogram.types import Message
 
 from storage import StorageProvider
-
-import io
 
 logger = logging.getLogger(__name__)
 

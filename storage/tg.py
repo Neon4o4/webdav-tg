@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import AsyncIterator, Optional, List, Dict, Any, Tuple
 
 import pyrogram
+import pyrogram.errors
 import pyrogram.file_id
 from pyrogram.types import Message
 
@@ -234,7 +235,15 @@ class TelegramStorageProvider(StorageProvider):
 
     async def __write_document(self, chat_id: int, file_buffer: io.BytesIO) -> Message:
         async def wrapper(fut):
-            data_msg = await self.client.send_document(chat_id, file_buffer)
+            data_msg: Optional[Message] = None
+            while True:
+                try:
+                    data_msg = await self.client.send_document(chat_id, file_buffer)
+                    break
+                except pyrogram.errors.FloodWait as e:
+                    logger.warning('flood wait; chat_id: %d, wait: %d', chat_id, e.value)
+                    await asyncio.sleep(e.value)
+                    continue
             logger.info('sent document; chat_id: %d, name: %s', chat_id, file_buffer.name)
             fut.set_result(data_msg)
 

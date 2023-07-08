@@ -149,7 +149,7 @@ class TelegramStorageProvider(StorageProvider):
         async def idle():
             while self.running:
                 try:
-                    await asyncio.sleep(0.02)
+                    await asyncio.sleep(0.5)
                 except asyncio.CancelledError:
                     break
 

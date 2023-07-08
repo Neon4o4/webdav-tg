@@ -1,0 +1,54 @@
+tg-webdav:
+  pyrogram:
+    name: bot
+    bot_token: {%PYROGRAM_BOT_TOKEN%}
+    api_id: {%PYROGRAM_API_ID%}
+    api_hash: {%PYROGRAM_API_HASH%}
+    max_concurrent_transmissions: 64
+    proxy:
+      enabled: {%PYROGRAM_PROXY_ENABLED%}
+      scheme: {%PYROGRAM_PROXY_SCHEME%}
+      hostname: {%PYROGRAM_PROXY_HOSTNAME%}
+      port: {%PYROGRAM_PROXY_PORT%}
+  storage:
+    data_chat: {%TG_DATA_CHAT%}
+    chunk_size: 2097152000  # 2G
+
+
+logging:
+  disable_existing_loggers: false
+  formatters:
+    standard:
+      format: '[%(levelname)s][%(asctime)s][%(threadName)s][%(filename)s %(lineno)d] %(message)s'
+    coloredlogs:
+      (): 'coloredlogs.ColoredFormatter'
+      format: '[%(levelname)s][%(asctime)s][%(threadName)s][%(filename)s %(lineno)d] %(message)s'
+  handlers:
+    logfile:
+      backupCount: 3
+      class: logging.handlers.TimedRotatingFileHandler
+      filename: logs/service.log
+      formatter: standard
+      when: midnight
+    console:
+      class: logging.StreamHandler
+      formatter: coloredlogs
+  loggers:
+    apscheduler:
+      level: WARNING
+      handlers: [ console, logfile ]
+      propagate: false
+    pyrogram:
+      level: INFO
+      propagate: false
+    tglogger-console:
+      level: INFO
+      handlers: [ console, logfile ]
+      propagate: false
+  root:
+    handlers: [ logfile, console ]
+    level: INFO
+  version: 1
+
+
+

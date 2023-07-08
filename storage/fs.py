@@ -1,7 +1,7 @@
 import mimetypes
 import os.path
 import shutil
-from typing import AsyncIterator
+from typing import AsyncIterator, List
 
 from aiofile import async_open
 
@@ -37,7 +37,7 @@ class FilesystemStorageProvider(StorageProvider):
     async def is_dir(self, path: str) -> bool:
         return os.path.isdir(self.get_path(path))
 
-    async def ls(self, path: str) -> list[str]:
+    async def ls(self, path: str) -> List[str]:
         real_path = self.get_path(path)
         return os.listdir(real_path) if os.path.isdir(real_path) else [path]
 

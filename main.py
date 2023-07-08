@@ -16,4 +16,4 @@ webdav = WebDav(TelegramStorageProvider('./db/tg_file_meta.db', CONFIG['tg-webda
 if __name__ == '__main__':
     logger.info('starting...')
     webdav.app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024 * 4
-    webdav.app.run(host='127.0.0.1', port=5000, debug=False)
+    webdav.app.run(host=CONFIG['web']['host'], port=CONFIG['web']['port'], debug=False)

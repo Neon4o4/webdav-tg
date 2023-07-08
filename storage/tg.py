@@ -198,7 +198,7 @@ class TelegramStorageProvider(StorageProvider):
         node = self.get_file_node(path)
         return node is not None and node.is_dir
 
-    async def ls(self, path: str) -> list[str]:
+    async def ls(self, path: str) -> List[str]:
         node = self.get_file_node(path)
         if not node:
             return []
@@ -247,7 +247,7 @@ class TelegramStorageProvider(StorageProvider):
             raise RuntimeError('failed to send document')
         return future.result
 
-    async def __delete_documents(self, chat_id: int, message_ids: list[int]) -> int:
+    async def __delete_documents(self, chat_id: int, message_ids: List[int]) -> int:
         async def wrapper(fut):
             deleted = await self.client.delete_messages(chat_id, message_ids)
             logger.info('deleted %d documents; chat_id: %d, message_ids: %s', deleted, chat_id, message_ids)

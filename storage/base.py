@@ -1,6 +1,6 @@
 import abc
 from dataclasses import dataclass
-from typing import AsyncIterator
+from typing import AsyncIterator, List
 
 
 class StorageProvider:
@@ -26,7 +26,7 @@ class StorageProvider:
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def ls(self, path: str) -> list[str]:
+    async def ls(self, path: str) -> List[str]:
         raise NotImplementedError
 
     @abc.abstractmethod
